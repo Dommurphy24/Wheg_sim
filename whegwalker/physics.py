@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import random
 from dataclasses import dataclass
 
 import pymunk
@@ -14,6 +15,7 @@ from whegwalker.genetics import (
     KNEE_ANGLE_MAX,
     KNEE_ANGLE_MIN,
     Genome,
+    RobotType,
 )
 
 
@@ -23,6 +25,7 @@ class FitnessWeights:
     forward_distance: float = 20.0
     low_bounce: float = 20.0
     low_energy: float = 20.0
+    fall_penalty: float = 100.0
 
     def __post_init__(self) -> None:
         weights = (
@@ -30,13 +33,14 @@ class FitnessWeights:
             self.forward_distance,
             self.low_bounce,
             self.low_energy,
+            self.fall_penalty,
         )
         if any(
             not math.isfinite(weight) or not 0.0 <= weight <= 100.0
             for weight in weights
         ):
             raise ValueError("Fitness weights must be finite values between 0 and 100")
-        if not any(weights):
+        if not any(weights[:4]):
             raise ValueError("At least one fitness weight must be greater than zero")
 
 
@@ -44,7 +48,7 @@ DEFAULT_FITNESS_WEIGHTS = FitnessWeights()
 
 
 class WhegSimulation:
-    """One deterministic-time trial of the three-spoke articulated robot."""
+    """One deterministic-time trial of a wheg or biped robot."""
 
     DT = 1.0 / 120.0
     PHYSICS_SUBSTEPS = 4
@@ -71,9 +75,19 @@ class WhegSimulation:
     BOUNCE_REFERENCE = 80.0
     POWER_REFERENCE = 1_500_000.0
     FALL_PENALTY = 1.0
+    NOISE_FORCE = 1.0
+    NOISE_TORQUE = 10.0
 
-    def __init__(self, genome: Genome, start_x: float = 120.0) -> None:
+    def __init__(
+        self,
+        genome: Genome,
+        start_x: float = 120.0,
+        noise_seed: int | None = None,
+    ) -> None:
         self.genome = genome.copy()
+        self._noise_rng = random.Random(noise_seed)
+        self.robot_type: RobotType = self.genome.robot_type
+        self.leg_count = 3 if self.robot_type == "wheg" else 2
         self.limb_lengths = self.genome.limb_lengths.copy()
         self.space = pymunk.Space()
         self.space.gravity = (0.0, -self.GRAVITY)
@@ -84,8 +98,9 @@ class WhegSimulation:
         self.start_x = start_x
         self.fallen = False
         self.max_forward_speed = 0.0
-        self.min_torso_y = 160.0
-        self.max_torso_y = 160.0
+        center_y = 160.0 if self.robot_type == "wheg" else 180.0
+        self.min_torso_y = center_y
+        self.max_torso_y = center_y
         self.motor_energy = 0.0
 
         self.ground = pymunk.Segment(
@@ -98,13 +113,25 @@ class WhegSimulation:
         self.ground.elasticity = 0.0
         self.space.add(self.ground)
 
-        center = pymunk.Vec2d(start_x, 160.0)
+        center = pymunk.Vec2d(start_x, center_y)
         self.torso = pymunk.Body(
             self.TORSO_MASS,
-            pymunk.moment_for_circle(self.TORSO_MASS, 0, 23.0),
+            (
+                pymunk.moment_for_circle(self.TORSO_MASS, 0, 23.0)
+                if self.robot_type == "wheg"
+                else pymunk.moment_for_segment(
+                    self.TORSO_MASS, (0.0, -6.0), (0.0, 44.0), 19.0
+                )
+            ),
         )
         self.torso.position = center
-        self.torso_shape = pymunk.Circle(self.torso, 23.0)
+        self.torso_shape: pymunk.Shape
+        if self.robot_type == "wheg":
+            self.torso_shape = pymunk.Circle(self.torso, 23.0)
+        else:
+            self.torso_shape = pymunk.Segment(
+                self.torso, (0.0, -6.0), (0.0, 44.0), 19.0
+            )
         self.torso_shape.friction = 0.8
         self._set_robot_filter(self.torso_shape)
         self.space.add(self.torso, self.torso_shape)
@@ -116,21 +143,32 @@ class WhegSimulation:
         self.hip_springs: list[pymunk.DampedRotarySpring] = []
         self.knee_springs: list[pymunk.DampedRotarySpring] = []
         self.ankle_springs: list[pymunk.DampedRotarySpring] = []
+        self.hip_motors: list[pymunk.SimpleMotor] = []
         self.knee_motors: list[pymunk.SimpleMotor] = []
         self.ankle_motors: list[pymunk.SimpleMotor] = []
+        self.hip_anchors: list[pymunk.Vec2d] = []
 
-        leg_angles = [
-            -math.pi / 2.0,
-            -math.pi / 2.0 + 2.0 * math.pi / 3.0,
-            -math.pi / 2.0 + 4.0 * math.pi / 3.0,
-        ]
+        leg_angles = (
+            [
+                -math.pi / 2.0,
+                -math.pi / 2.0 + 2.0 * math.pi / 3.0,
+                -math.pi / 2.0 + 4.0 * math.pi / 3.0,
+            ]
+            if self.robot_type == "wheg"
+            else [-math.pi / 2.0, -math.pi / 2.0]
+        )
         hip_length, shin_length, foot_length = self.limb_lengths
-        for angle in leg_angles:
+        for index, angle in enumerate(leg_angles):
             hip_mass = self.HIP_MASS * hip_length / DEFAULT_LIMB_LENGTH
             shin_mass = self.SHIN_MASS * shin_length / DEFAULT_LIMB_LENGTH
             foot_mass = self.FOOT_MASS * foot_length / DEFAULT_LIMB_LENGTH
             direction = pymunk.Vec2d(math.cos(angle), math.sin(angle))
-            hip_center = center + direction * (hip_length / 2.0)
+            hip_anchor = (
+                center
+                if self.robot_type == "wheg"
+                else center + pymunk.Vec2d(0.0, -5.0)
+            )
+            hip_center = hip_anchor + direction * (hip_length / 2.0)
             hip = pymunk.Body(
                 hip_mass,
                 pymunk.moment_for_segment(
@@ -191,7 +229,7 @@ class WhegSimulation:
             foot_shape.friction = 1.2
             self._set_robot_filter(foot_shape)
 
-            hip_pivot = pymunk.PivotJoint(self.torso, hip, center)
+            hip_pivot = pymunk.PivotJoint(self.torso, hip, hip_anchor)
             hip_limits = pymunk.RotaryLimitJoint(
                 self.torso, hip, angle - self.HIP_LIMIT, angle + self.HIP_LIMIT
             )
@@ -233,6 +271,12 @@ class WhegSimulation:
                 self.JOINT_SPRING_DAMPING,
             )
             ankle_spring.max_force = self.JOINT_SPRING_TORQUE_LIMIT
+            hip_motor = pymunk.SimpleMotor(self.torso, hip, 0.0)
+            hip_motor.max_force = (
+                self.MOTOR_TORQUE_LIMIT
+                if self.robot_type == "biped" or index == 0
+                else 0.0
+            )
 
             self.space.add(
                 hip,
@@ -244,6 +288,7 @@ class WhegSimulation:
                 hip_pivot,
                 hip_limits,
                 hip_spring,
+                hip_motor,
                 knee_pivot,
                 knee_motor,
                 knee_limits,
@@ -256,43 +301,55 @@ class WhegSimulation:
             self.hip_springs.append(hip_spring)
             self.knee_springs.append(knee_spring)
             self.ankle_springs.append(ankle_spring)
+            self.hip_motors.append(hip_motor)
             self.hips.append(hip)
             self.shins.append(shin)
             self.feet.append(foot)
             self.knee_motors.append(knee_motor)
             self.ankle_motors.append(ankle_motor)
+            self.hip_anchors.append(hip_anchor)
 
         self.hip_initial_angle = self.hips[0].angle
         self.hip_initial_relative_angles = [
             hip.angle - self.torso.angle for hip in self.hips
         ]
-        self.hip_motor = pymunk.SimpleMotor(self.torso, self.hips[0], 0.0)
-        self.hip_motor.max_force = self.MOTOR_TORQUE_LIMIT
-        self.space.add(self.hip_motor)
+        self.hip_motor = self.hip_motors[0]
 
         self.hub_motor = pymunk.SimpleMotor(self.space.static_body, self.torso, 0.0)
-        self.hub_motor.max_force = self.HUB_TORQUE_LIMIT
+        self.hub_motor.max_force = (
+            self.HUB_TORQUE_LIMIT if self.robot_type == "wheg" else 0.0
+        )
         self.space.add(self.hub_motor)
         self._motor_body_pairs: list[
             tuple[pymunk.SimpleMotor, pymunk.Body, pymunk.Body]
         ] = [
             (self.hub_motor, self.space.static_body, self.torso),
-            (self.hip_motor, self.torso, self.hips[0]),
+            *zip(self.hip_motors, [self.torso] * self.leg_count, self.hips),
             *zip(self.knee_motors, self.hips, self.shins),
             *zip(self.ankle_motors, self.shins, self.feet),
         ]
 
-        for index in (1, 2):
-            phase = self.hips[index].angle - self.hips[0].angle
-            coupling = pymunk.GearJoint(
-                self.hips[0], self.hips[index], phase=phase, ratio=1.0
-            )
-            coupling.max_force = 1_000_000.0
-            self.space.add(coupling)
+        if self.robot_type == "wheg":
+            for index in (1, 2):
+                phase = self.hips[index].angle - self.hips[0].angle
+                coupling = pymunk.GearJoint(
+                    self.hips[0], self.hips[index], phase=phase, ratio=1.0
+                )
+                coupling.max_force = 1_000_000.0
+                self.space.add(coupling)
 
     @staticmethod
     def _set_robot_filter(shape: pymunk.Shape) -> None:
         shape.filter = pymunk.ShapeFilter(group=1)
+
+    def _biped_torso_touches_ground(self) -> bool:
+        lower_end = self.torso.local_to_world((0.0, -6.0))
+        upper_end = self.torso.local_to_world((0.0, 44.0))
+        lowest_torso_point = (
+            min(lower_end.y, upper_end.y) - self.torso_shape.radius
+        )
+        ground_top = self.ground_y + self.ground.radius
+        return lowest_torso_point <= ground_top
 
     def step(self, count: int = 1) -> None:
         for _ in range(count):
@@ -301,21 +358,43 @@ class WhegSimulation:
                 continue
 
             for substep_index in range(self.PHYSICS_SUBSTEPS):
-                # SimpleMotor.rate is body A relative to body B, so invert B's target.
-                self.hub_motor.rate = -self.genome.hub_speed
-                phase = 2.0 * math.pi * self.genome.frequency * self.elapsed
-                hip_target = (
-                    self.genome.hip_offset
-                    + self.genome.hip_amplitude * math.sin(phase)
+                self.torso.apply_force_at_local_point(
+                    (
+                        self._noise_rng.uniform(-self.NOISE_FORCE, self.NOISE_FORCE),
+                        self._noise_rng.uniform(-self.NOISE_FORCE, self.NOISE_FORCE),
+                    ),
+                    (0.0, 0.0),
                 )
-                for index, spring in enumerate(self.hip_springs):
+                self.torso.torque += self._noise_rng.uniform(
+                    -self.NOISE_TORQUE, self.NOISE_TORQUE
+                )
+                # SimpleMotor.rate is body A relative to body B, so invert B's target.
+                self.hub_motor.rate = (
+                    -self.genome.hub_speed if self.robot_type == "wheg" else 0.0
+                )
+                phase = 2.0 * math.pi * self.genome.frequency * self.elapsed
+                for index, (spring, motor) in enumerate(
+                    zip(self.hip_springs, self.hip_motors)
+                ):
+                    if self.robot_type == "wheg":
+                        hip_target = (
+                            self.genome.hip_offset
+                            + self.genome.hip_amplitude * math.sin(phase)
+                        )
+                    else:
+                        hip_target = self.genome.hip_offset + (
+                            self.genome.hip_amplitudes[index]
+                            * math.sin(phase + self.genome.hip_phases[index])
+                        )
                     spring.rest_angle = -(
                         self.hip_initial_relative_angles[index] + hip_target
                     )
-                hip_relative = (
-                    self.hips[0].angle - self.torso.angle - self.hip_initial_angle
-                )
-                self.hip_motor.rate = -9.0 * (hip_target - hip_relative)
+                    hip_relative = (
+                        self.hips[index].angle
+                        - self.torso.angle
+                        - self.hip_initial_relative_angles[index]
+                    )
+                    motor.rate = -9.0 * (hip_target - hip_relative)
 
                 for index, motor in enumerate(self.knee_motors):
                     target = self.genome.knee_offset + (
@@ -350,7 +429,12 @@ class WhegSimulation:
                     )
                     for motor, body_a, body_b in self._motor_body_pairs
                 )
-                if self.torso.position.y < 48.0:
+                torso_hit_ground = (
+                    self._biped_torso_touches_ground()
+                    if self.robot_type == "biped"
+                    else self.torso.position.y < 48.0
+                )
+                if torso_hit_ground:
                     self.fallen = True
                     self.elapsed += (
                         self.PHYSICS_SUBSTEPS - substep_index - 1
@@ -383,4 +467,5 @@ class WhegSimulation:
             + weights.low_bounce * bounce_score
             + weights.low_energy * energy_score
         ) / total_weight
-        return score - (self.FALL_PENALTY if self.fallen else 0.0)
+        fall_penalty = self.FALL_PENALTY * weights.fall_penalty / 100.0
+        return score - (fall_penalty if self.fallen else 0.0)

@@ -4,7 +4,7 @@ import multiprocessing
 import queue
 import time
 
-from whegwalker.genetics import GeneticAlgorithm
+from whegwalker.genetics import GeneticAlgorithm, RobotType
 from whegwalker.physics import (
     DEFAULT_FITNESS_WEIGHTS,
     FitnessWeights,
@@ -16,11 +16,14 @@ def _evolution_worker(
     population_size: int,
     trial_seconds: float,
     fitness_weights: FitnessWeights,
+    robot_type: RobotType,
     messages: multiprocessing.queues.Queue,
     stop_event: multiprocessing.synchronize.Event,
     pause_event: multiprocessing.synchronize.Event,
 ) -> None:
-    algorithm = GeneticAlgorithm(population_size=population_size)
+    algorithm = GeneticAlgorithm(
+        population_size=population_size, robot_type=robot_type
+    )
     best_fitness = float("-inf")
     best_genome = algorithm.population[0].copy()
     history: list[float] = []
@@ -94,10 +97,12 @@ class EvolutionWorker:
         population_size: int = 16,
         trial_seconds: float = 5.0,
         fitness_weights: FitnessWeights = DEFAULT_FITNESS_WEIGHTS,
+        robot_type: RobotType = "wheg",
     ) -> None:
         self.population_size = population_size
         self.trial_seconds = trial_seconds
         self.fitness_weights = fitness_weights
+        self.robot_type = robot_type
         self._context = multiprocessing.get_context("spawn")
         self._messages = self._context.Queue()
         self._stop_event = self._context.Event()
@@ -108,6 +113,7 @@ class EvolutionWorker:
                 population_size,
                 trial_seconds,
                 fitness_weights,
+                robot_type,
                 self._messages,
                 self._stop_event,
                 self._pause_event,
@@ -173,8 +179,12 @@ class Trainer:
         self,
         population_size: int = 16,
         fitness_weights: FitnessWeights = DEFAULT_FITNESS_WEIGHTS,
+        robot_type: RobotType = "wheg",
     ) -> None:
-        self.algorithm = GeneticAlgorithm(population_size=population_size)
+        self.robot_type = robot_type
+        self.algorithm = GeneticAlgorithm(
+            population_size=population_size, robot_type=robot_type
+        )
         self.fitness_weights = fitness_weights
         self.candidate_index = 0
         self.scores: list[float] = []
@@ -213,7 +223,12 @@ class Trainer:
         )
 
     def reset(self) -> None:
-        self.__init__(
+        self.algorithm = GeneticAlgorithm(
             population_size=self.population_size,
-            fitness_weights=self.fitness_weights,
+            robot_type=self.robot_type,
         )
+        self.candidate_index = 0
+        self.scores = []
+        self.simulation = WhegSimulation(self.algorithm.population[0])
+        self.history = []
+        self.last_generation_best = None

@@ -108,6 +108,45 @@ class SimulationTests(unittest.TestCase):
             0.5,
         )
 
+    def test_falling_applies_a_full_point_fitness_penalty(self) -> None:
+        standing = WhegSimulation(test_genome())
+        fallen = WhegSimulation(test_genome())
+        for simulation in (standing, fallen):
+            simulation.elapsed = 5.0
+            simulation.torso.position = (
+                simulation.start_x + 500.0,
+                simulation.torso.position.y,
+            )
+            simulation.max_forward_speed = 100.0
+            simulation.min_torso_y = 140.0
+            simulation.max_torso_y = 180.0
+            simulation.motor_energy = 1_000_000.0
+        fallen.fallen = True
+
+        self.assertAlmostEqual(
+            standing.fitness() - fallen.fitness(),
+            WhegSimulation.FALL_PENALTY,
+        )
+        self.assertLess(fallen.fitness(), 0.0)
+
+    def test_fall_penalty_weight_scales_the_fall_penalty_only(self) -> None:
+        weights = FitnessWeights(fall_penalty=35.0)
+        standing = WhegSimulation(test_genome())
+        fallen = WhegSimulation(test_genome())
+        for simulation in (standing, fallen):
+            simulation.elapsed = 5.0
+            simulation.torso.position = (simulation.start_x + 500.0, 160.0)
+            simulation.max_forward_speed = 100.0
+            simulation.min_torso_y = 140.0
+            simulation.max_torso_y = 180.0
+            simulation.motor_energy = 1_000_000.0
+        fallen.fallen = True
+
+        self.assertAlmostEqual(
+            standing.fitness(weights) - fallen.fitness(weights),
+            WhegSimulation.FALL_PENALTY * 0.35,
+        )
+
     def test_distance_per_time_reward_distinguishes_forward_progress(self) -> None:
         weights = FitnessWeights(
             max_speed=0.0,
@@ -137,6 +176,14 @@ class SimulationTests(unittest.TestCase):
             )
         with self.assertRaises(ValueError):
             FitnessWeights(max_speed=101.0)
+        with self.assertRaises(ValueError):
+            FitnessWeights(
+                max_speed=0.0,
+                forward_distance=0.0,
+                low_bounce=0.0,
+                low_energy=0.0,
+                fall_penalty=0.0,
+            )
 
     def test_trial_records_speed_bounce_and_energy_metrics(self) -> None:
         simulation = WhegSimulation(test_genome())
@@ -145,6 +192,21 @@ class SimulationTests(unittest.TestCase):
         self.assertGreater(simulation.max_forward_speed, 0.0)
         self.assertGreater(simulation.max_torso_y, simulation.min_torso_y)
         self.assertGreater(simulation.motor_energy, 0.0)
+
+    def test_small_random_disturbances_are_seedable_and_affect_motion(self) -> None:
+        first = WhegSimulation(test_genome(), noise_seed=123)
+        repeat = WhegSimulation(test_genome(), noise_seed=123)
+        different = WhegSimulation(test_genome(), noise_seed=124)
+
+        for simulation in (first, repeat, different):
+            simulation.step(120)
+
+        self.assertAlmostEqual(
+            (first.torso.position - repeat.torso.position).length, 0.0, places=10
+        )
+        self.assertGreater(
+            (first.torso.position - different.torso.position).length, 0.001
+        )
 
     def test_fitness_sliders_update_weights_and_prevent_zero_total(self) -> None:
         app = SimulatorApp.__new__(SimulatorApp)
@@ -160,10 +222,10 @@ class SimulationTests(unittest.TestCase):
             app._fitness_slider_at(
                 (
                     FITNESS_SLIDER_RIGHT,
-                    FITNESS_SLIDER_TOP + 3 * FITNESS_SLIDER_SPACING,
+                    FITNESS_SLIDER_TOP + 4 * FITNESS_SLIDER_SPACING,
                 )
             ),
-            "low_energy",
+            "fall_penalty",
         )
         app._set_fitness_slider("max_speed", FITNESS_SLIDER_LEFT)
         app._set_fitness_slider("forward_distance", FITNESS_SLIDER_LEFT)
@@ -174,6 +236,23 @@ class SimulationTests(unittest.TestCase):
         self.assertEqual(app.fitness_weights.forward_distance, 0)
         self.assertEqual(app.fitness_weights.low_bounce, 0)
         self.assertEqual(app.fitness_weights.low_energy, 1)
+
+        app._set_fitness_slider("fall_penalty", FITNESS_SLIDER_LEFT)
+        self.assertEqual(app.fitness_weights.fall_penalty, 0)
+
+    def test_robot_selector_changes_mode_and_restarts_evolution(self) -> None:
+        app = SimulatorApp.__new__(SimulatorApp)
+        app.robot_type = "wheg"
+        restart_calls = []
+        app._restart_evolution = lambda: restart_calls.append(True)
+
+        self.assertEqual(app._robot_button_at((900, 560)), "wheg")
+        self.assertEqual(app._robot_button_at((970, 560)), "biped")
+        self.assertIsNone(app._robot_button_at((900, 600)))
+        app._set_robot_type("biped")
+
+        self.assertEqual(app.robot_type, "biped")
+        self.assertEqual(restart_calls, [True])
 
     def test_all_leg_segments_have_equal_length_and_connected_anchors(self) -> None:
         genome = test_genome()
@@ -195,6 +274,47 @@ class SimulationTests(unittest.TestCase):
                  - hip.local_to_world((-lengths[0] / 2.0, 0.0))).length,
                 lengths[0],
             )
+
+    def test_biped_has_two_three_dof_legs_and_no_wheg_hub_drive(self) -> None:
+        genome = Genome.random(random.Random(81), "biped")
+        simulation = WhegSimulation(genome)
+        simulation.step(2)
+
+        self.assertEqual(simulation.robot_type, "biped")
+        self.assertEqual(simulation.leg_count, 2)
+        self.assertEqual(len(simulation.hips), 2)
+        self.assertEqual(len(simulation.shins), 2)
+        self.assertEqual(len(simulation.feet), 2)
+        self.assertEqual(len(simulation.hip_motors), 2)
+        self.assertEqual(len(simulation.knee_motors), 2)
+        self.assertEqual(len(simulation.ankle_motors), 2)
+        self.assertTrue(
+            all(
+                motor.max_force == simulation.MOTOR_TORQUE_LIMIT
+                for motor in simulation.hip_motors
+            )
+        )
+        self.assertEqual(simulation.hub_motor.max_force, 0.0)
+        self.assertEqual(simulation.genome.hub_speed, 0.0)
+        self.assertTrue(any(abs(motor.rate) > 0.0 for motor in simulation.hip_motors))
+        self.assertEqual(len(simulation.hip_anchors), 2)
+        self.assertAlmostEqual(
+            (simulation.hip_anchors[0] - simulation.hip_anchors[1]).length, 0.0
+        )
+
+    def test_biped_trial_ends_when_torso_capsule_touches_ground(self) -> None:
+        simulation = WhegSimulation(Genome.random(random.Random(82), "biped"))
+        simulation.space.gravity = (0.0, 0.0)
+        simulation.torso.position = (simulation.start_x, 70.0)
+
+        simulation.step()
+        self.assertFalse(simulation.fallen)
+
+        simulation.torso.position = (simulation.start_x, 60.0)
+        simulation.step()
+
+        self.assertTrue(simulation.fallen)
+        self.assertGreater(simulation.torso.position.y, 48.0)
 
     def test_motor_torque_is_bounded_to_prevent_velocity_runaway(self) -> None:
         simulation = WhegSimulation(test_genome())
@@ -588,12 +708,26 @@ class SimulationTests(unittest.TestCase):
         self.assertEqual(trainer.evaluating, 1)
         self.assertEqual(len(trainer.history), 1)
 
+    def test_trainer_reset_preserves_selected_robot_type(self) -> None:
+        trainer = Trainer(population_size=2, robot_type="biped")
+        trainer.update(5)
+
+        trainer.reset()
+
+        self.assertEqual(trainer.robot_type, "biped")
+        self.assertTrue(
+            all(genome.robot_type == "biped" for genome in trainer.algorithm.population)
+        )
+        self.assertEqual(trainer.simulation.robot_type, "biped")
+        self.assertEqual(trainer.candidate_index, 0)
+
 
 class EvolutionWorkerTests(unittest.TestCase):
     def test_worker_evaluates_candidates_independently(self) -> None:
         worker = EvolutionWorker(
             population_size=2,
             trial_seconds=0.1,
+            robot_type="biped",
             fitness_weights=FitnessWeights(
                 max_speed=100.0,
                 forward_distance=0.0,
@@ -617,6 +751,7 @@ class EvolutionWorkerTests(unittest.TestCase):
             self.assertLessEqual(status["evaluated"], status["population_size"])
             self.assertEqual(status["population_size"], 2)
             self.assertIsNotNone(status["best_genome"])
+            self.assertEqual(status["best_genome"].robot_type, "biped")
             self.assertTrue(worker.running)
         finally:
             worker.stop()

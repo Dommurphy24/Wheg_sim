@@ -5,7 +5,7 @@ import math
 import pygame
 import pymunk
 
-from whegwalker.genetics import Genome
+from whegwalker.genetics import Genome, RobotType
 from whegwalker.physics import (
     DEFAULT_FITNESS_WEIGHTS,
     FitnessWeights,
@@ -34,6 +34,7 @@ FITNESS_SLIDERS = (
     ("forward_distance", "Distance / time"),
     ("low_bounce", "Low bounce"),
     ("low_energy", "Low energy"),
+    ("fall_penalty", "Fall penalty"),
 )
 WINDOW_FIT_FRACTION = 0.9
 
@@ -89,9 +90,12 @@ class SimulatorApp:
         self.small_font = pygame.font.SysFont("segoeui", 14)
         self.title_font = pygame.font.SysFont("segoeui", 24, bold=True)
         self.fitness_weights = DEFAULT_FITNESS_WEIGHTS
+        self.robot_type: RobotType = "wheg"
         self._active_fitness_slider: str | None = None
         self._weights_before_drag: FitnessWeights | None = None
-        self.evolution = EvolutionWorker(fitness_weights=self.fitness_weights)
+        self.evolution = EvolutionWorker(
+            fitness_weights=self.fitness_weights, robot_type=self.robot_type
+        )
         self.evolution.start()
         self.training = True
         self.best_simulation: WhegSimulation | None = None
@@ -130,12 +134,19 @@ class SimulatorApp:
                     self.speed = 2
                 elif event.key == pygame.K_3:
                     self.speed = 4
+                elif event.key == pygame.K_t:
+                    self._set_robot_type(
+                        "biped" if self.robot_type == "wheg" else "wheg"
+                    )
                 elif event.key == pygame.K_b and self.displayed_genome is not None:
                     self.best_simulation = WhegSimulation(self.displayed_genome)
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 position = _window_to_canvas(event.pos, self.window.get_size())
+                robot_type = self._robot_button_at(position)
                 slider = self._fitness_slider_at(position)
-                if slider is not None:
+                if robot_type is not None:
+                    self._set_robot_type(robot_type)
+                elif slider is not None:
                     self._active_fitness_slider = slider
                     self._weights_before_drag = self.fitness_weights
                     self._set_fitness_slider(slider, position[0])
@@ -170,11 +181,30 @@ class SimulatorApp:
 
     def _restart_evolution(self) -> None:
         self.evolution.stop()
-        self.evolution = EvolutionWorker(fitness_weights=self.fitness_weights)
+        self.evolution = EvolutionWorker(
+            fitness_weights=self.fitness_weights, robot_type=self.robot_type
+        )
         self.evolution.set_paused(not self.training)
         self.evolution.start()
         self.best_simulation = None
         self.displayed_genome = None
+
+    def _set_robot_type(self, robot_type: RobotType) -> None:
+        if robot_type == self.robot_type:
+            return
+        self.robot_type = robot_type
+        self._restart_evolution()
+
+    @staticmethod
+    def _robot_button_at(position: tuple[int, int]) -> RobotType | None:
+        x, y = position
+        if not 548 <= y <= 574:
+            return None
+        if 874 <= x <= 938:
+            return "wheg"
+        if 944 <= x <= 1014:
+            return "biped"
+        return None
 
     def _fitness_slider_at(self, position: tuple[int, int]) -> str | None:
         x, y = position
@@ -196,8 +226,8 @@ class SimulatorApp:
             for slider_name, _ in FITNESS_SLIDERS
         }
         weights[name] = value
-        if not any(weights.values()):
-            weights[name] = 1
+        if not any(weights[metric] for metric, _ in FITNESS_SLIDERS[:-1]):
+            weights["low_energy"] = 1
         self.fitness_weights = FitnessWeights(**weights)
 
     def _update(self) -> None:
@@ -306,13 +336,33 @@ class SimulatorApp:
             )
 
         center = self._world_to_screen(simulation.torso.position)
-        pygame.draw.circle(self.screen, (212, 221, 234), center, 24)
-        pygame.draw.circle(self.screen, (64, 78, 96), center, 18)
-        pygame.draw.circle(self.screen, ACCENT, center, 5)
-        heading = simulation.torso.local_to_world((26.0, 0.0))
-        pygame.draw.line(
-            self.screen, (255, 255, 255), center, self._world_to_screen(heading), 3
-        )
+        if simulation.robot_type == "wheg":
+            pygame.draw.circle(self.screen, (212, 221, 234), center, 24)
+            pygame.draw.circle(self.screen, (64, 78, 96), center, 18)
+            pygame.draw.circle(self.screen, ACCENT, center, 5)
+            heading = simulation.torso.local_to_world((26.0, 0.0))
+            pygame.draw.line(
+                self.screen,
+                (255, 255, 255),
+                center,
+                self._world_to_screen(heading),
+                3,
+            )
+        else:
+            torso_top = simulation.torso.local_to_world((0.0, 44.0))
+            torso_bottom = simulation.torso.local_to_world((0.0, -6.0))
+            pygame.draw.line(
+                self.screen,
+                (212, 221, 234),
+                self._world_to_screen(torso_bottom),
+                self._world_to_screen(torso_top),
+                22,
+            )
+            pygame.draw.circle(self.screen, ACCENT, self._world_to_screen(torso_top), 8)
+            for anchor in simulation.hip_anchors:
+                pygame.draw.circle(
+                    self.screen, (64, 78, 96), self._world_to_screen(anchor), 6
+                )
 
         delta = simulation.torso.position.x - simulation.start_x
         bar_x = center[0]
@@ -341,14 +391,31 @@ class SimulatorApp:
             math.degrees(foot.angle - shin.angle)
             for shin, foot in zip(simulation.shins, simulation.feet)
         ]
-        lines = (
-            f"Hub: {math.degrees(simulation.torso.angle) % 360:.0f} deg"
-            f"  {simulation.torso.angular_velocity:+.2f} rad/s"
-            f"  target {simulation.genome.hub_speed:+.2f}",
-            f"Shared hip: {hip_angle:+.0f} deg"
-            f"  knees: {knee_angles[0]:+.0f}, {knee_angles[1]:+.0f}, {knee_angles[2]:+.0f} deg",
-            f"ankles: {ankle_angles[0]:+.0f}, {ankle_angles[1]:+.0f}, {ankle_angles[2]:+.0f} deg",
-        )
+        if simulation.robot_type == "wheg":
+            lines = (
+                f"Hub: {math.degrees(simulation.torso.angle) % 360:.0f} deg"
+                f"  {simulation.torso.angular_velocity:+.2f} rad/s"
+                f"  target {simulation.genome.hub_speed:+.2f}",
+                f"Shared hip: {hip_angle:+.0f} deg"
+                f"  knees: {knee_angles[0]:+.0f}, {knee_angles[1]:+.0f}, {knee_angles[2]:+.0f} deg",
+                f"ankles: {ankle_angles[0]:+.0f}, {ankle_angles[1]:+.0f}, {ankle_angles[2]:+.0f} deg",
+            )
+        else:
+            hip_angles = [
+                math.degrees(
+                    hip.angle - simulation.torso.angle - initial_angle
+                )
+                for hip, initial_angle in zip(
+                    simulation.hips, simulation.hip_initial_relative_angles
+                )
+            ]
+            lines = (
+                f"Torso: {math.degrees(simulation.torso.angle):+.0f} deg"
+                f"  {simulation.torso.angular_velocity:+.2f} rad/s",
+                f"Hips L/R: {hip_angles[0]:+.0f} / {hip_angles[1]:+.0f}"
+                f"  knees: {knee_angles[0]:+.0f} / {knee_angles[1]:+.0f} deg",
+                f"Ankles L/R: {ankle_angles[0]:+.0f} / {ankle_angles[1]:+.0f} deg",
+            )
         for index, line in enumerate(lines):
             label = self.small_font.render(line, True, MUTED)
             self.screen.blit(label, (20, 18 + index * 21))
@@ -399,18 +466,28 @@ class SimulatorApp:
             text("Waiting for first trial...", 269, MUTED, self.small_font)
         else:
             text(f"Frequency: {genome.frequency:.2f} Hz", 269)
-            text(
-                f"Hub motor: {genome.hub_speed:+.2f} rad/s",
-                295,
-                ACCENT,
-                self.small_font,
-            )
-            text(
-                f"Shared hip amplitude: {genome.hip_amplitude:.2f} rad",
-                319,
-                MUTED,
-                self.small_font,
-            )
+            if self.robot_type == "wheg":
+                text(
+                    f"Hub motor: {genome.hub_speed:+.2f} rad/s",
+                    295,
+                    ACCENT,
+                    self.small_font,
+                )
+                text(
+                    f"Shared hip amplitude: {genome.hip_amplitude:.2f} rad",
+                    319,
+                    MUTED,
+                    self.small_font,
+                )
+            else:
+                text("Hub motor: inactive", 295, MUTED, self.small_font)
+                text(
+                    "Hip amplitudes L/R: "
+                    + " / ".join(f"{amplitude:.2f}" for amplitude in genome.hip_amplitudes),
+                    319,
+                    MUTED,
+                    self.small_font,
+                )
             text(
                 "Knee amplitudes: "
                 + " / ".join(f"{amplitude:.2f}" for amplitude in genome.knee_amplitudes),
@@ -454,14 +531,30 @@ class SimulatorApp:
         self._draw_chart((x + 24, chart_top + 34, PANEL_WIDTH - 48, 56))
 
         pygame.draw.line(
-            self.screen, (62, 72, 88), (cursor, 552), (WIDTH - 24, 552), 1
+            self.screen, (62, 72, 88), (cursor, 544), (WIDTH - 24, 544), 1
         )
-        text("CONTROLS", 550, ACCENT, self.small_font)
-        text("Space pause  |  B replay  |  1/2/3 speed", 570, MUTED, self.small_font)
-        text("R restart  |  slider changes restart GA", 588, MUTED, self.small_font)
+        text("ROBOT", 550, ACCENT, self.small_font)
+        for robot_type, label, button_x, button_width in (
+            ("wheg", "Wheg", 874, 64),
+            ("biped", "Biped", 944, 70),
+        ):
+            selected = self.robot_type == robot_type
+            button_rect = pygame.Rect(button_x, 548, button_width, 24)
+            pygame.draw.rect(
+                self.screen,
+                (38, 101, 88) if selected else (48, 57, 72),
+                button_rect,
+                border_radius=5,
+            )
+            button_text = self.small_font.render(label, True, TEXT)
+            self.screen.blit(
+                button_text, button_text.get_rect(center=button_rect.center)
+            )
+        text("T switch  |  Space pause  |  B replay", 574, MUTED, self.small_font)
+        text("1/2/3 speed  |  R restart", 592, MUTED, self.small_font)
         text("FITNESS WEIGHTS", 608, ACCENT, self.small_font)
         text(
-            "Relative weights",
+            "Metric weights / fall penalty %",
             622,
             MUTED,
             self.small_font,

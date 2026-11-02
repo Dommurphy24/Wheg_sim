@@ -34,6 +34,25 @@ class GenomeTests(unittest.TestCase):
             [DEFAULT_LIMB_LENGTH] * 3,
         )
 
+    def test_biped_genomes_evolve_two_independent_hip_drives(self) -> None:
+        first = Genome.random(random.Random(70), "biped")
+        second = Genome.random(random.Random(71), "biped")
+        child = Genome.crossover(first, second, random.Random(72))
+        child.mutate(random.Random(73), rate=1.0)
+        algorithm = GeneticAlgorithm(population_size=4, robot_type="biped")
+
+        self.assertEqual(first.robot_type, "biped")
+        self.assertEqual(first.hub_speed, 0.0)
+        self.assertEqual(len(first.hip_amplitudes), 2)
+        self.assertEqual(len(first.hip_phases), 2)
+        self.assertEqual(len(first.knee_amplitudes), 2)
+        self.assertEqual(len(first.ankle_amplitudes), 2)
+        self.assertEqual(child.robot_type, "biped")
+        self.assertEqual(child.hub_speed, 0.0)
+        self.assertEqual(len(child.hip_amplitudes), 2)
+        self.assertEqual(len(algorithm.population), 4)
+        self.assertTrue(all(g.robot_type == "biped" for g in algorithm.population))
+
     def test_mutation_respects_parameter_bounds(self) -> None:
         genome = Genome.random(random.Random(3))
         for seed in range(100):
