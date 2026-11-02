@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import pymunk
 
@@ -16,13 +17,38 @@ from whegwalker.genetics import (
 )
 
 
+@dataclass(frozen=True)
+class FitnessWeights:
+    max_speed: float = 40.0
+    forward_distance: float = 20.0
+    low_bounce: float = 20.0
+    low_energy: float = 20.0
+
+    def __post_init__(self) -> None:
+        weights = (
+            self.max_speed,
+            self.forward_distance,
+            self.low_bounce,
+            self.low_energy,
+        )
+        if any(
+            not math.isfinite(weight) or not 0.0 <= weight <= 100.0
+            for weight in weights
+        ):
+            raise ValueError("Fitness weights must be finite values between 0 and 100")
+        if not any(weights):
+            raise ValueError("At least one fitness weight must be greater than zero")
+
+
+DEFAULT_FITNESS_WEIGHTS = FitnessWeights()
+
+
 class WhegSimulation:
     """One deterministic-time trial of the three-spoke articulated robot."""
 
     DT = 1.0 / 120.0
     PHYSICS_SUBSTEPS = 4
     SOLVER_ITERATIONS = 25
-    MAX_JOINT_RATE = 8.0
     GROUND_HALF_LENGTH = 1_000_000.0
     HIP_LENGTH = 46.0
     SHIN_LENGTH = 46.0
@@ -38,6 +64,13 @@ class WhegSimulation:
     FOOT_MASS = 0.4
     MOTOR_TORQUE_LIMIT = 750_000.0
     HUB_TORQUE_LIMIT = 2_000_000.0
+    JOINT_SPRING_STIFFNESS = 300.0
+    JOINT_SPRING_DAMPING = 300.0
+    JOINT_SPRING_TORQUE_LIMIT = 50_000.0
+    SPEED_REFERENCE = 200.0
+    BOUNCE_REFERENCE = 80.0
+    POWER_REFERENCE = 1_500_000.0
+    FALL_PENALTY = 1.0
 
     def __init__(self, genome: Genome, start_x: float = 120.0) -> None:
         self.genome = genome.copy()
@@ -50,6 +83,10 @@ class WhegSimulation:
         self.elapsed = 0.0
         self.start_x = start_x
         self.fallen = False
+        self.max_forward_speed = 0.0
+        self.min_torso_y = 160.0
+        self.max_torso_y = 160.0
+        self.motor_energy = 0.0
 
         self.ground = pymunk.Segment(
             self.space.static_body,
@@ -76,6 +113,9 @@ class WhegSimulation:
         self.shins: list[pymunk.Body] = []
         self.feet: list[pymunk.Body] = []
         self.knee_joints: list[pymunk.PivotJoint] = []
+        self.hip_springs: list[pymunk.DampedRotarySpring] = []
+        self.knee_springs: list[pymunk.DampedRotarySpring] = []
+        self.ankle_springs: list[pymunk.DampedRotarySpring] = []
         self.knee_motors: list[pymunk.SimpleMotor] = []
         self.ankle_motors: list[pymunk.SimpleMotor] = []
 
@@ -155,6 +195,14 @@ class WhegSimulation:
             hip_limits = pymunk.RotaryLimitJoint(
                 self.torso, hip, angle - self.HIP_LIMIT, angle + self.HIP_LIMIT
             )
+            hip_spring = pymunk.DampedRotarySpring(
+                self.torso,
+                hip,
+                self.torso.angle - hip.angle,
+                self.JOINT_SPRING_STIFFNESS,
+                self.JOINT_SPRING_DAMPING,
+            )
+            hip_spring.max_force = self.JOINT_SPRING_TORQUE_LIMIT
             knee_pivot = pymunk.PivotJoint(hip, shin, knee_world)
             knee_pivot.collide_bodies = False
             knee_motor = pymunk.SimpleMotor(hip, shin, 0.0)
@@ -162,6 +210,14 @@ class WhegSimulation:
             knee_limits = pymunk.RotaryLimitJoint(
                 hip, shin, -self.KNEE_LIMIT, self.KNEE_LIMIT
             )
+            knee_spring = pymunk.DampedRotarySpring(
+                hip,
+                shin,
+                hip.angle - shin.angle,
+                self.JOINT_SPRING_STIFFNESS,
+                self.JOINT_SPRING_DAMPING,
+            )
+            knee_spring.max_force = self.JOINT_SPRING_TORQUE_LIMIT
             ankle_pivot = pymunk.PivotJoint(shin, foot, ankle_world)
             ankle_pivot.collide_bodies = False
             ankle_motor = pymunk.SimpleMotor(shin, foot, 0.0)
@@ -169,6 +225,14 @@ class WhegSimulation:
             ankle_limits = pymunk.RotaryLimitJoint(
                 shin, foot, self.ANKLE_MIN, self.ANKLE_MAX
             )
+            ankle_spring = pymunk.DampedRotarySpring(
+                shin,
+                foot,
+                shin.angle - foot.angle,
+                self.JOINT_SPRING_STIFFNESS,
+                self.JOINT_SPRING_DAMPING,
+            )
+            ankle_spring.max_force = self.JOINT_SPRING_TORQUE_LIMIT
 
             self.space.add(
                 hip,
@@ -179,13 +243,19 @@ class WhegSimulation:
                 foot_shape,
                 hip_pivot,
                 hip_limits,
+                hip_spring,
                 knee_pivot,
                 knee_motor,
                 knee_limits,
+                knee_spring,
                 ankle_pivot,
                 ankle_motor,
                 ankle_limits,
+                ankle_spring,
             )
+            self.hip_springs.append(hip_spring)
+            self.knee_springs.append(knee_spring)
+            self.ankle_springs.append(ankle_spring)
             self.hips.append(hip)
             self.shins.append(shin)
             self.feet.append(foot)
@@ -193,6 +263,9 @@ class WhegSimulation:
             self.ankle_motors.append(ankle_motor)
 
         self.hip_initial_angle = self.hips[0].angle
+        self.hip_initial_relative_angles = [
+            hip.angle - self.torso.angle for hip in self.hips
+        ]
         self.hip_motor = pymunk.SimpleMotor(self.torso, self.hips[0], 0.0)
         self.hip_motor.max_force = self.MOTOR_TORQUE_LIMIT
         self.space.add(self.hip_motor)
@@ -200,6 +273,14 @@ class WhegSimulation:
         self.hub_motor = pymunk.SimpleMotor(self.space.static_body, self.torso, 0.0)
         self.hub_motor.max_force = self.HUB_TORQUE_LIMIT
         self.space.add(self.hub_motor)
+        self._motor_body_pairs: list[
+            tuple[pymunk.SimpleMotor, pymunk.Body, pymunk.Body]
+        ] = [
+            (self.hub_motor, self.space.static_body, self.torso),
+            (self.hip_motor, self.torso, self.hips[0]),
+            *zip(self.knee_motors, self.hips, self.shins),
+            *zip(self.ankle_motors, self.shins, self.feet),
+        ]
 
         for index in (1, 2):
             phase = self.hips[index].angle - self.hips[0].angle
@@ -227,53 +308,79 @@ class WhegSimulation:
                     self.genome.hip_offset
                     + self.genome.hip_amplitude * math.sin(phase)
                 )
+                for index, spring in enumerate(self.hip_springs):
+                    spring.rest_angle = -(
+                        self.hip_initial_relative_angles[index] + hip_target
+                    )
                 hip_relative = (
                     self.hips[0].angle - self.torso.angle - self.hip_initial_angle
                 )
-                self.hip_motor.rate = -max(
-                    -self.MAX_JOINT_RATE,
-                    min(
-                        self.MAX_JOINT_RATE,
-                        9.0 * (hip_target - hip_relative),
-                    ),
-                )
+                self.hip_motor.rate = -9.0 * (hip_target - hip_relative)
 
                 for index, motor in enumerate(self.knee_motors):
                     target = self.genome.knee_offset + (
                         self.genome.knee_amplitudes[index]
                         * math.sin(phase + self.genome.knee_phases[index])
                     )
+                    self.knee_springs[index].rest_angle = -target
                     relative_angle = self.shins[index].angle - self.hips[index].angle
-                    motor.rate = -max(
-                        -self.MAX_JOINT_RATE,
-                        min(
-                            self.MAX_JOINT_RATE,
-                            10.0 * (target - relative_angle),
-                        ),
-                    )
+                    motor.rate = -10.0 * (target - relative_angle)
 
                 for index, motor in enumerate(self.ankle_motors):
                     target = self.genome.ankle_offset + (
                         self.genome.ankle_amplitudes[index]
                         * math.sin(phase + self.genome.ankle_phases[index])
                     )
+                    self.ankle_springs[index].rest_angle = -target
                     relative_angle = self.feet[index].angle - self.shins[index].angle
-                    motor.rate = -max(
-                        -self.MAX_JOINT_RATE,
-                        min(
-                            self.MAX_JOINT_RATE,
-                            10.0 * (target - relative_angle),
-                        ),
-                    )
+                    motor.rate = -10.0 * (target - relative_angle)
 
                 self.space.step(self.DT / self.PHYSICS_SUBSTEPS)
-                self.elapsed += self.DT / self.PHYSICS_SUBSTEPS
+                substep = self.DT / self.PHYSICS_SUBSTEPS
+                self.elapsed += substep
+                self.max_forward_speed = max(
+                    self.max_forward_speed, self.torso.velocity.x
+                )
+                self.min_torso_y = min(self.min_torso_y, self.torso.position.y)
+                self.max_torso_y = max(self.max_torso_y, self.torso.position.y)
+                self.motor_energy += sum(
+                    abs(
+                        motor.impulse
+                        * (body_b.angular_velocity - body_a.angular_velocity)
+                    )
+                    for motor, body_a, body_b in self._motor_body_pairs
+                )
                 if self.torso.position.y < 48.0:
                     self.fallen = True
                     self.elapsed += (
                         self.PHYSICS_SUBSTEPS - substep_index - 1
                     ) * self.DT / self.PHYSICS_SUBSTEPS
                     break
-    def fitness(self) -> float:
-        distance = self.torso.position.x - self.start_x
-        return distance - (120.0 if self.fallen else 0.0)
+
+    def fitness(self, weights: FitnessWeights = DEFAULT_FITNESS_WEIGHTS) -> float:
+        speed_score = self.max_forward_speed / (
+            self.max_forward_speed + self.SPEED_REFERENCE
+        )
+        forward_speed = max(0.0, self.torso.position.x - self.start_x) / max(
+            self.elapsed, self.DT
+        )
+        forward_distance_score = forward_speed / (
+            forward_speed + self.SPEED_REFERENCE
+        )
+        bounce = self.max_torso_y - self.min_torso_y
+        bounce_score = 1.0 / (1.0 + bounce / self.BOUNCE_REFERENCE)
+        mean_power = self.motor_energy / max(self.elapsed, self.DT)
+        energy_score = 1.0 / (1.0 + mean_power / self.POWER_REFERENCE)
+        total_weight = (
+            weights.max_speed
+            + weights.forward_distance
+            + weights.low_bounce
+            + weights.low_energy
+        )
+        score = (
+            weights.max_speed * speed_score
+            + weights.forward_distance * forward_distance_score
+            + weights.low_bounce * bounce_score
+            + weights.low_energy * energy_score
+        ) / total_weight
+        return score - (self.FALL_PENALTY if self.fallen else 0.0)

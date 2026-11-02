@@ -36,6 +36,10 @@ playback speed, and **R** starts a fresh population. The teal upper leg marks
 the shared hip drive. Each generation evaluates every candidate for the same
 five-second simulated duration.
 The ground has scrolling distance marks to make forward movement easier to see.
+The four fitness-weight sliders are relative weights for maximum forward
+speed, forward distance per trial time, reduced hub bounce, and reduced motor
+energy use. Releasing a changed slider restarts evolution with a fresh
+population so all candidates are scored consistently.
 
 ## Architecture
 
@@ -53,21 +57,30 @@ The ground has scrolling distance marks to make forward movement easier to see.
 - `whegwalker/app.py` renders the robot, fitness history, and live training
   status, and handles keyboard controls.
 
-Fitness rewards forward displacement and penalizes the hub dropping below the
-floor threshold. Hub rotation is not treated as a fall: it is an intended,
+Fitness is the weighted mean of four normalized scores: peak forward speed,
+net forward distance per trial time, low hub vertical range during the trial,
+and low mean mechanical power used by the hub and joint motors. The speed and
+distance-per-time references are 200 units/s, the bounce reference is 80
+units, and the power reference is 1,500,000 simulator units. Default relative
+weights are 40, 20, 20, and 20, respectively. A fall incurs a separate
+1-point penalty. Hub rotation is not treated as a fall: it is an intended,
 powered degree of freedom. The controller evolves periodic hip/knee targets
 and hub speed rather than a neural network so the relationship between the
 genome, joint motion, and locomotion is easy to inspect. The simulation uses a
 simple flat floor and is an educational prototype, not a high-fidelity
 robotics model.
 
-Joint motors are capped at 750,000 simulator torque units, with an 8 rad/s
-maximum commanded rate. The cap was raised from 250,000 after seeded gait
-trials showed frequent saturation and lower fitness; a gravity-loaded knee
-tracking test confirms the joint motors retain torque headroom. The hub motor
-is capped at 2,000,000 to retain torque reserve when the stronger joints are
-moving against gravity. Torque values are simulator units, not real-world
-motor specifications.
+Joint motors are torque-limited to 750,000 simulator units, but have no maximum
+joint-speed cap: their commanded angular rates respond proportionally to target
+error. The torque cap was raised from 250,000 after seeded gait trials showed
+frequent saturation and lower fitness; a gravity-loaded knee tracking test
+confirms the joint motors retain torque headroom. The hub motor is torque-
+limited to 2,000,000 to retain reserve when the stronger joints move against
+gravity. Every actuated joint also has a damped rotary spring following its
+gait target, with stiffness 300, damping 300, and a 50,000 torque cap. This
+allows unpowered or torque-overloaded joints to yield during impacts and return
+toward their targets. Joint angle limits remain in effect. Torque values are
+simulator units, not real-world motor specifications.
 
 ## Tests
 

@@ -6,7 +6,11 @@ import pygame
 import pymunk
 
 from whegwalker.genetics import Genome
-from whegwalker.physics import WhegSimulation
+from whegwalker.physics import (
+    DEFAULT_FITNESS_WEIGHTS,
+    FitnessWeights,
+    WhegSimulation,
+)
 from whegwalker.trainer import EvolutionWorker
 
 WIDTH = 1100
@@ -21,18 +25,73 @@ ORANGE = (255, 170, 90)
 GROUND = (87, 100, 116)
 VIEW_WIDTH = WIDTH - PANEL_WIDTH
 TRACK_MARK_SPACING = 100
+FITNESS_SLIDER_LEFT = WIDTH - PANEL_WIDTH + 128
+FITNESS_SLIDER_RIGHT = WIDTH - 24
+FITNESS_SLIDER_TOP = 636
+FITNESS_SLIDER_SPACING = 18
+FITNESS_SLIDERS = (
+    ("max_speed", "Max speed"),
+    ("forward_distance", "Distance / time"),
+    ("low_bounce", "Low bounce"),
+    ("low_energy", "Low energy"),
+)
+WINDOW_FIT_FRACTION = 0.9
+
+
+def _fit_window_size(desktop_size: tuple[int, int]) -> tuple[int, int]:
+    desktop_width, desktop_height = desktop_size
+    scale = min(
+        1.0,
+        desktop_width * WINDOW_FIT_FRACTION / WIDTH,
+        desktop_height * WINDOW_FIT_FRACTION / HEIGHT,
+    )
+    return max(1, round(WIDTH * scale)), max(1, round(HEIGHT * scale))
+
+
+def _canvas_viewport(
+    window_size: tuple[int, int],
+) -> tuple[int, int, int, int]:
+    window_width, window_height = window_size
+    scale = min(window_width / WIDTH, window_height / HEIGHT)
+    viewport_width = round(WIDTH * scale)
+    viewport_height = round(HEIGHT * scale)
+    return (
+        (window_width - viewport_width) // 2,
+        (window_height - viewport_height) // 2,
+        viewport_width,
+        viewport_height,
+    )
+
+
+def _window_to_canvas(
+    position: tuple[int, int],
+    window_size: tuple[int, int],
+) -> tuple[int, int]:
+    viewport_x, viewport_y, viewport_width, viewport_height = _canvas_viewport(
+        window_size
+    )
+    return (
+        round((position[0] - viewport_x) * WIDTH / viewport_width),
+        round((position[1] - viewport_y) * HEIGHT / viewport_height),
+    )
 
 
 class SimulatorApp:
     def __init__(self) -> None:
         pygame.init()
         pygame.display.set_caption("Wheg Walker - Genetic Algorithm Lab")
-        self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
+        desktop = pygame.display.Info()
+        window_size = _fit_window_size((desktop.current_w, desktop.current_h))
+        self.window = pygame.display.set_mode(window_size, pygame.RESIZABLE)
+        self.screen = pygame.Surface((WIDTH, HEIGHT))
         self.clock = pygame.time.Clock()
         self.font = pygame.font.SysFont("segoeui", 18)
         self.small_font = pygame.font.SysFont("segoeui", 14)
         self.title_font = pygame.font.SysFont("segoeui", 24, bold=True)
-        self.evolution = EvolutionWorker()
+        self.fitness_weights = DEFAULT_FITNESS_WEIGHTS
+        self._active_fitness_slider: str | None = None
+        self._weights_before_drag: FitnessWeights | None = None
+        self.evolution = EvolutionWorker(fitness_weights=self.fitness_weights)
         self.evolution.start()
         self.training = True
         self.best_simulation: WhegSimulation | None = None
@@ -47,7 +106,7 @@ class SimulatorApp:
                 self._events()
                 self._update()
                 self._draw()
-                pygame.display.flip()
+                self._present()
                 self.clock.tick(60)
         finally:
             self.evolution.stop()
@@ -57,17 +116,14 @@ class SimulatorApp:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
+            elif event.type == pygame.VIDEORESIZE:
+                self.window = pygame.display.set_mode(event.size, pygame.RESIZABLE)
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_SPACE:
                     self.training = not self.training
                     self.evolution.set_paused(not self.training)
                 elif event.key == pygame.K_r:
-                    self.evolution.stop()
-                    self.evolution = EvolutionWorker()
-                    self.evolution.set_paused(not self.training)
-                    self.evolution.start()
-                    self.best_simulation = None
-                    self.displayed_genome = None
+                    self._restart_evolution()
                 elif event.key == pygame.K_1:
                     self.speed = 1
                 elif event.key == pygame.K_2:
@@ -76,6 +132,73 @@ class SimulatorApp:
                     self.speed = 4
                 elif event.key == pygame.K_b and self.displayed_genome is not None:
                     self.best_simulation = WhegSimulation(self.displayed_genome)
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                position = _window_to_canvas(event.pos, self.window.get_size())
+                slider = self._fitness_slider_at(position)
+                if slider is not None:
+                    self._active_fitness_slider = slider
+                    self._weights_before_drag = self.fitness_weights
+                    self._set_fitness_slider(slider, position[0])
+            elif event.type == pygame.MOUSEMOTION:
+                if self._active_fitness_slider is not None:
+                    position = _window_to_canvas(event.pos, self.window.get_size())
+                    self._set_fitness_slider(
+                        self._active_fitness_slider, position[0]
+                    )
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                if self._active_fitness_slider is not None:
+                    position = _window_to_canvas(event.pos, self.window.get_size())
+                    self._set_fitness_slider(
+                        self._active_fitness_slider, position[0]
+                    )
+                    changed = self.fitness_weights != self._weights_before_drag
+                    self._active_fitness_slider = None
+                    self._weights_before_drag = None
+                    if changed:
+                        self._restart_evolution()
+
+    def _present(self) -> None:
+        self.window = pygame.display.get_surface()
+        viewport = _canvas_viewport(self.window.get_size())
+        viewport_rect = pygame.Rect(viewport)
+        scaled = pygame.transform.smoothscale(
+            self.screen, viewport_rect.size
+        )
+        self.window.fill(BACKGROUND)
+        self.window.blit(scaled, viewport_rect.topleft)
+        pygame.display.flip()
+
+    def _restart_evolution(self) -> None:
+        self.evolution.stop()
+        self.evolution = EvolutionWorker(fitness_weights=self.fitness_weights)
+        self.evolution.set_paused(not self.training)
+        self.evolution.start()
+        self.best_simulation = None
+        self.displayed_genome = None
+
+    def _fitness_slider_at(self, position: tuple[int, int]) -> str | None:
+        x, y = position
+        if not FITNESS_SLIDER_LEFT - 8 <= x <= FITNESS_SLIDER_RIGHT + 8:
+            return None
+        for index, (name, _) in enumerate(FITNESS_SLIDERS):
+            slider_y = FITNESS_SLIDER_TOP + index * FITNESS_SLIDER_SPACING
+            if abs(y - slider_y) <= 12:
+                return name
+        return None
+
+    def _set_fitness_slider(self, name: str, mouse_x: int) -> None:
+        fraction = (mouse_x - FITNESS_SLIDER_LEFT) / (
+            FITNESS_SLIDER_RIGHT - FITNESS_SLIDER_LEFT
+        )
+        value = round(max(0.0, min(1.0, fraction)) * 100.0)
+        weights = {
+            slider_name: int(getattr(self.fitness_weights, slider_name))
+            for slider_name, _ in FITNESS_SLIDERS
+        }
+        weights[name] = value
+        if not any(weights.values()):
+            weights[name] = 1
+        self.fitness_weights = FitnessWeights(**weights)
 
     def _update(self) -> None:
         status = self.evolution.poll()
@@ -254,7 +377,7 @@ class SimulatorApp:
         )
         best = status["best_fitness"]
         best_label = (
-            f"{best:.1f}"
+            f"{best:.3f}"
             if best is not None and math.isfinite(best)
             else "evaluating..."
         )
@@ -268,7 +391,7 @@ class SimulatorApp:
                 self.small_font,
             )
         elif generation_best is not None:
-            text(f"Generation best: {generation_best:.1f}", 192, MUTED)
+            text(f"Generation best: {generation_best:.3f}", 192, MUTED)
 
         pygame.draw.line(self.screen, (62, 72, 88), (cursor, 224), (WIDTH - 24, 224), 1)
         text("CURRENT GAIT", 242, ORANGE, self.small_font)
@@ -327,17 +450,50 @@ class SimulatorApp:
         pygame.draw.line(
             self.screen, (62, 72, 88), (cursor, chart_top), (WIDTH - 24, chart_top), 1
         )
-        text("BEST FITNESS BY GENERATION", chart_top + 14, MUTED, self.small_font)
-        self._draw_chart((x + 24, chart_top + 42, PANEL_WIDTH - 48, 80))
+        text("BEST FITNESS BY GENERATION", chart_top + 10, MUTED, self.small_font)
+        self._draw_chart((x + 24, chart_top + 34, PANEL_WIDTH - 48, 56))
 
         pygame.draw.line(
-            self.screen, (62, 72, 88), (cursor, 568), (WIDTH - 24, 568), 1
+            self.screen, (62, 72, 88), (cursor, 552), (WIDTH - 24, 552), 1
         )
-        text("CONTROLS", 582, ACCENT, self.small_font)
-        text("Space  pause / resume training", 608, MUTED, self.small_font)
-        text("B  replay best evolved gait", 630, MUTED, self.small_font)
-        text("1 / 2 / 3  playback speed", 652, MUTED, self.small_font)
-        text("R  restart evolution", 674, MUTED, self.small_font)
+        text("CONTROLS", 550, ACCENT, self.small_font)
+        text("Space pause  |  B replay  |  1/2/3 speed", 570, MUTED, self.small_font)
+        text("R restart  |  slider changes restart GA", 588, MUTED, self.small_font)
+        text("FITNESS WEIGHTS", 608, ACCENT, self.small_font)
+        text(
+            "Relative weights",
+            622,
+            MUTED,
+            self.small_font,
+        )
+        for index, (name, label) in enumerate(FITNESS_SLIDERS):
+            track_y = FITNESS_SLIDER_TOP + index * FITNESS_SLIDER_SPACING
+            label_y = track_y - 9
+            weight = getattr(self.fitness_weights, name)
+            text(label, label_y, MUTED, self.small_font)
+            value_label = self.small_font.render(f"{weight:.0f}", True, TEXT)
+            self.screen.blit(
+                value_label,
+                (FITNESS_SLIDER_LEFT - 10 - value_label.get_width(), label_y),
+            )
+            pygame.draw.line(
+                self.screen,
+                (74, 84, 100),
+                (FITNESS_SLIDER_LEFT, track_y),
+                (FITNESS_SLIDER_RIGHT, track_y),
+                4,
+            )
+            thumb_x = FITNESS_SLIDER_LEFT + round(
+                (FITNESS_SLIDER_RIGHT - FITNESS_SLIDER_LEFT) * weight / 100.0
+            )
+            pygame.draw.line(
+                self.screen,
+                ACCENT,
+                (FITNESS_SLIDER_LEFT, track_y),
+                (thumb_x, track_y),
+                4,
+            )
+            pygame.draw.circle(self.screen, ACCENT, (thumb_x, track_y), 7)
         error = status["error"]
         state = "ERROR" if error else "TRAINING" if self.training else "PAUSED"
         badge = self.small_font.render(state, True, TEXT)

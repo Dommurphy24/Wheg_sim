@@ -5,12 +5,17 @@ import queue
 import time
 
 from whegwalker.genetics import GeneticAlgorithm
-from whegwalker.physics import WhegSimulation
+from whegwalker.physics import (
+    DEFAULT_FITNESS_WEIGHTS,
+    FitnessWeights,
+    WhegSimulation,
+)
 
 
 def _evolution_worker(
     population_size: int,
     trial_seconds: float,
+    fitness_weights: FitnessWeights,
     messages: multiprocessing.queues.Queue,
     stop_event: multiprocessing.synchronize.Event,
     pause_event: multiprocessing.synchronize.Event,
@@ -56,7 +61,7 @@ def _evolution_worker(
                         time.sleep(0.05)
                     simulation.step(min(30, steps_per_trial - step_index))
 
-                score = simulation.fitness()
+                score = simulation.fitness(fitness_weights)
                 generation_scores.append(score)
                 if score > best_fitness:
                     best_fitness = score
@@ -84,9 +89,15 @@ def _evolution_worker(
 class EvolutionWorker:
     """Runs fitness trials in a process independent of the display loop."""
 
-    def __init__(self, population_size: int = 16, trial_seconds: float = 5.0) -> None:
+    def __init__(
+        self,
+        population_size: int = 16,
+        trial_seconds: float = 5.0,
+        fitness_weights: FitnessWeights = DEFAULT_FITNESS_WEIGHTS,
+    ) -> None:
         self.population_size = population_size
         self.trial_seconds = trial_seconds
+        self.fitness_weights = fitness_weights
         self._context = multiprocessing.get_context("spawn")
         self._messages = self._context.Queue()
         self._stop_event = self._context.Event()
@@ -96,6 +107,7 @@ class EvolutionWorker:
             args=(
                 population_size,
                 trial_seconds,
+                fitness_weights,
                 self._messages,
                 self._stop_event,
                 self._pause_event,
@@ -157,8 +169,13 @@ class Trainer:
     TRIAL_SECONDS = 5.0
     STEPS_PER_FRAME = 24
 
-    def __init__(self, population_size: int = 16) -> None:
+    def __init__(
+        self,
+        population_size: int = 16,
+        fitness_weights: FitnessWeights = DEFAULT_FITNESS_WEIGHTS,
+    ) -> None:
         self.algorithm = GeneticAlgorithm(population_size=population_size)
+        self.fitness_weights = fitness_weights
         self.candidate_index = 0
         self.scores: list[float] = []
         self.simulation = WhegSimulation(self.algorithm.population[0])
@@ -182,7 +199,7 @@ class Trainer:
         if self.simulation.elapsed + self.simulation.DT / 2.0 < self.TRIAL_SECONDS:
             return
 
-        self.scores.append(self.simulation.fitness())
+        self.scores.append(self.simulation.fitness(self.fitness_weights))
         self.candidate_index += 1
         if self.candidate_index == self.population_size:
             self.last_generation_best = max(self.scores)
@@ -196,4 +213,7 @@ class Trainer:
         )
 
     def reset(self) -> None:
-        self.__init__(population_size=self.population_size)
+        self.__init__(
+            population_size=self.population_size,
+            fitness_weights=self.fitness_weights,
+        )
