@@ -147,6 +147,27 @@ class SimulationTests(unittest.TestCase):
             WhegSimulation.FALL_PENALTY * 0.35,
         )
 
+    def test_fall_penalty_halves_each_half_life_upright(self) -> None:
+        simulations = [
+            WhegSimulation(test_genome())
+            for _ in range(3)
+        ]
+        for simulation, upright_time in zip(
+            simulations,
+            (
+                0.0,
+                WhegSimulation.FALL_PENALTY_HALF_LIFE,
+                2.0 * WhegSimulation.FALL_PENALTY_HALF_LIFE,
+            ),
+        ):
+            simulation.fallen = True
+            simulation.upright_time = upright_time
+
+        base_penalty = WhegSimulation.FALL_PENALTY
+        scores = [simulation.fitness() for simulation in simulations]
+        self.assertAlmostEqual(scores[1] - scores[0], base_penalty * 0.5)
+        self.assertAlmostEqual(scores[2] - scores[1], base_penalty * 0.25)
+
     def test_distance_per_time_reward_distinguishes_forward_progress(self) -> None:
         weights = FitnessWeights(
             max_speed=0.0,
@@ -415,7 +436,7 @@ class SimulationTests(unittest.TestCase):
         genome.knee_amplitudes = [0.0, 0.0, 0.0]
         genome.ankle_offset = DEFAULT_ANKLE_ANGLE
         genome.ankle_amplitudes = [0.0, 0.0, 0.0]
-        simulation = WhegSimulation(genome)
+        simulation = WhegSimulation(genome, noise_seed=1, terrain_seed=2)
         simulation.space.gravity = (0.0, 0.0)
         motors = [
             simulation.hub_motor,

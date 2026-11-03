@@ -68,8 +68,9 @@ trial, and low mean mechanical power used by active motors. The speed and
 distance-per-time references are 200 units/s, the bounce reference is 80
 units, and the power reference is 1,500,000 simulator units. Default relative
 weights are 40, 20, 20, and 20, respectively. A fall subtracts 1.0 from the
-normalized fitness score, making fallen trials score below zero. Wheg hub
-rotation is not treated as a fall: it is an intended,
+normalized fitness score at the instant of a fall; this deduction halves for
+every five seconds the robot remained upright. Wheg hub rotation is not treated
+as a fall: it is an intended,
 powered degree of freedom. Biped genomes evolve independent hip amplitudes and
 phases as well as knee and ankle targets; wheg genomes retain their shared
 coupled hip drive and hub speed. The controller uses periodic joint targets
@@ -89,8 +90,9 @@ disturbances to the torso. Passing `terrain_seed` and `noise_seed` to
 
 The fall-penalty slider scales the separate fall deduction from 0% to 100% of
 the default 1.0-point penalty. At 0%, falls incur no deduction; at 100%, the
-original full penalty applies. The other four sliders continue to weight the
-normalized performance metrics.
+full deduction applies to an immediate fall and halves every five seconds
+spent upright. The other four sliders continue to weight the normalized
+performance metrics.
 
 Joint motors are torque-limited to 750,000 simulator units, but have no maximum
 joint-speed cap: their commanded angular rates respond proportionally to target

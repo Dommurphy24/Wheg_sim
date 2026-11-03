@@ -79,6 +79,7 @@ class WhegSimulation:
     BOUNCE_REFERENCE = 80.0
     POWER_REFERENCE = 1_500_000.0
     FALL_PENALTY = 1.0
+    FALL_PENALTY_HALF_LIFE = 5.0
     NOISE_FORCE = 1.0
     NOISE_TORQUE = 10.0
 
@@ -108,6 +109,7 @@ class WhegSimulation:
         self.space.iterations = self.SOLVER_ITERATIONS
         self.ground_y = 32.0
         self.elapsed = 0.0
+        self.upright_time = 0.0
         self.start_x = start_x
         self.fallen = False
         self.max_forward_speed = 0.0
@@ -523,6 +525,7 @@ class WhegSimulation:
                 self.space.step(self.DT / self.PHYSICS_SUBSTEPS)
                 substep = self.DT / self.PHYSICS_SUBSTEPS
                 self.elapsed += substep
+                self.upright_time += substep
                 self.max_forward_speed = max(
                     self.max_forward_speed, self.torso.velocity.x
                 )
@@ -574,5 +577,10 @@ class WhegSimulation:
             + weights.low_bounce * bounce_score
             + weights.low_energy * energy_score
         ) / total_weight
-        fall_penalty = self.FALL_PENALTY * weights.fall_penalty / 100.0
+        fall_penalty = (
+            self.FALL_PENALTY
+            * weights.fall_penalty
+            / 100.0
+            * 0.5 ** (self.upright_time / self.FALL_PENALTY_HALF_LIFE)
+        )
         return score - (fall_penalty if self.fallen else 0.0)
