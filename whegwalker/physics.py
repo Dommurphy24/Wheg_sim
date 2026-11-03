@@ -53,7 +53,11 @@ class WhegSimulation:
     DT = 1.0 / 120.0
     PHYSICS_SUBSTEPS = 4
     SOLVER_ITERATIONS = 25
-    GROUND_HALF_LENGTH = 1_000_000.0
+    TERRAIN_NODE_SPACING = 96.0
+    TERRAIN_SEGMENT_LENGTH = 24.0
+    TERRAIN_AMPLITUDE = 10.0
+    TERRAIN_RADIUS = 4.0
+    TERRAIN_SENSOR_SAMPLE_COUNT = 9
     HIP_LENGTH = 46.0
     SHIN_LENGTH = 46.0
     FOOT_LENGTH = 46.0
@@ -83,12 +87,21 @@ class WhegSimulation:
         genome: Genome,
         start_x: float = 120.0,
         noise_seed: int | None = None,
+        terrain_seed: int | None = None,
     ) -> None:
         self.genome = genome.copy()
         self._noise_rng = random.Random(noise_seed)
+        self._terrain_seed = random.Random(terrain_seed).getrandbits(64)
         self.robot_type: RobotType = self.genome.robot_type
         self.leg_count = 3 if self.robot_type == "wheg" else 2
         self.limb_lengths = self.genome.limb_lengths.copy()
+        torso_height = 46.0 if self.robot_type == "wheg" else 50.0
+        self.robot_height = sum(self.limb_lengths) + torso_height
+        self.terrain_sensor_range = self.robot_height * 2.0
+        self.terrain_sensor_distances = tuple(
+            self.terrain_sensor_range * index / (self.TERRAIN_SENSOR_SAMPLE_COUNT - 1)
+            for index in range(self.TERRAIN_SENSOR_SAMPLE_COUNT)
+        )
         self.space = pymunk.Space()
         self.space.gravity = (0.0, -self.GRAVITY)
         self.space.damping = 0.995
@@ -103,15 +116,12 @@ class WhegSimulation:
         self.max_torso_y = center_y
         self.motor_energy = 0.0
 
-        self.ground = pymunk.Segment(
-            self.space.static_body,
-            (-self.GROUND_HALF_LENGTH, self.ground_y),
-            (self.GROUND_HALF_LENGTH, self.ground_y),
-            4.0,
-        )
-        self.ground.friction = 1.2
-        self.ground.elasticity = 0.0
-        self.space.add(self.ground)
+        self._terrain_nodes: dict[int, float] = {0: 0.0}
+        self.terrain_segments: list[pymunk.Segment] = []
+        self.terrain_start_x = start_x - 2.0 * self.terrain_sensor_range
+        self.terrain_end_x = self.terrain_start_x
+        self._extend_terrain_to(start_x + 4.0 * self.terrain_sensor_range)
+        self.ground = self.terrain_segments[0]
 
         center = pymunk.Vec2d(start_x, center_y)
         self.torso = pymunk.Body(
@@ -135,6 +145,7 @@ class WhegSimulation:
         self.torso_shape.friction = 0.8
         self._set_robot_filter(self.torso_shape)
         self.space.add(self.torso, self.torso_shape)
+        self.terrain_sensor_readings = self.read_terrain_ahead()
 
         self.hips: list[pymunk.Body] = []
         self.shins: list[pymunk.Body] = []
@@ -342,14 +353,107 @@ class WhegSimulation:
     def _set_robot_filter(shape: pymunk.Shape) -> None:
         shape.filter = pymunk.ShapeFilter(group=1)
 
-    def _biped_torso_touches_ground(self) -> bool:
-        lower_end = self.torso.local_to_world((0.0, -6.0))
-        upper_end = self.torso.local_to_world((0.0, 44.0))
-        lowest_torso_point = (
-            min(lower_end.y, upper_end.y) - self.torso_shape.radius
+    def _terrain_node_height(self, index: int) -> float:
+        if index not in self._terrain_nodes:
+            if index == 0:
+                self._terrain_nodes[index] = 0.0
+            else:
+                node_rng = random.Random(self._terrain_seed + index)
+                self._terrain_nodes[index] = node_rng.uniform(
+                    -self.TERRAIN_AMPLITUDE, self.TERRAIN_AMPLITUDE
+                )
+        return self._terrain_nodes[index]
+
+    def _terrain_profile_height(self, x: float) -> float:
+        node_position = (x - self.start_x) / self.TERRAIN_NODE_SPACING
+        left_index = math.floor(node_position)
+        fraction = node_position - left_index
+        start = self._terrain_node_height(left_index)
+        end = self._terrain_node_height(left_index + 1)
+        smooth_fraction = fraction * fraction * (3.0 - 2.0 * fraction)
+        return self.ground_y + start + (end - start) * smooth_fraction
+
+    def terrain_height_at(self, x: float) -> float:
+        """Return the terrain's collision surface height at a world x position."""
+        return self._terrain_profile_height(x) + self.TERRAIN_RADIUS
+
+    def read_terrain_ahead(self) -> tuple[float, ...]:
+        """Return sampled ground heights relative to the nominal flat-ground top."""
+        baseline = self.ground_y + self.TERRAIN_RADIUS
+        return tuple(
+            self.terrain_height_at(self.torso.position.x + distance) - baseline
+            for distance in self.terrain_sensor_distances
         )
-        ground_top = self.ground_y + self.ground.radius
-        return lowest_torso_point <= ground_top
+
+    def _extend_terrain_to(self, end_x: float) -> None:
+        if end_x <= self.terrain_end_x:
+            return
+        if not hasattr(self, "_terrain_nodes"):
+            self._terrain_nodes = {0: 0.0}
+
+        start_x = self.terrain_end_x
+        if not self.terrain_segments:
+            start_x = math.floor(
+                (self.terrain_start_x - self.start_x) / self.TERRAIN_SEGMENT_LENGTH
+            ) * self.TERRAIN_SEGMENT_LENGTH + self.start_x
+            self.terrain_start_x = start_x
+
+        segment_start = start_x
+        while segment_start < end_x:
+            segment_end = min(segment_start + self.TERRAIN_SEGMENT_LENGTH, end_x)
+            if segment_end - segment_start < 1e-6:
+                break
+            segment = pymunk.Segment(
+                self.space.static_body,
+                (segment_start, self._terrain_profile_height(segment_start)),
+                (segment_end, self._terrain_profile_height(segment_end)),
+                self.TERRAIN_RADIUS,
+            )
+            segment.friction = 1.2
+            segment.elasticity = 0.0
+            self.space.add(segment)
+            self.terrain_segments.append(segment)
+            segment_start = segment_end
+        self.terrain_end_x = segment_start
+
+    def _update_terrain_sensor(self) -> None:
+        self._extend_terrain_to(
+            self.torso.position.x
+            + self.terrain_sensor_range
+            + self.TERRAIN_SEGMENT_LENGTH
+        )
+        self.terrain_sensor_readings = self.read_terrain_ahead()
+
+    def _terrain_knee_lift(self) -> float:
+        if (
+            self.torso.position.y - self.terrain_height_at(self.torso.position.x)
+            > self.robot_height
+        ):
+            return 0.0
+        near_sensor_count = max(
+            2, self.TERRAIN_SENSOR_SAMPLE_COUNT // 2
+        )
+        local_floor = (
+            self.terrain_height_at(self.torso.position.x)
+            - (self.ground_y + self.TERRAIN_RADIUS)
+        )
+        upcoming_rise = max(
+            0.0,
+            max(self.terrain_sensor_readings[1:near_sensor_count]) - local_floor,
+        )
+        terrain_scale = max(2.0 * self.TERRAIN_AMPLITUDE, 1e-6)
+        return min(0.35, upcoming_rise * 0.35 / terrain_scale)
+
+    def _biped_torso_touches_ground(self) -> bool:
+        for index in range(5):
+            local_y = -6.0 + index * 50.0 / 4.0
+            torso_point = self.torso.local_to_world((0.0, local_y))
+            if (
+                torso_point.y - self.torso_shape.radius
+                <= self.terrain_height_at(torso_point.x)
+            ):
+                return True
+        return False
 
     def step(self, count: int = 1) -> None:
         for _ in range(count):
@@ -358,6 +462,7 @@ class WhegSimulation:
                 continue
 
             for substep_index in range(self.PHYSICS_SUBSTEPS):
+                self._update_terrain_sensor()
                 self.torso.apply_force_at_local_point(
                     (
                         self._noise_rng.uniform(-self.NOISE_FORCE, self.NOISE_FORCE),
@@ -401,6 +506,7 @@ class WhegSimulation:
                         self.genome.knee_amplitudes[index]
                         * math.sin(phase + self.genome.knee_phases[index])
                     )
+                    target += self._terrain_knee_lift()
                     self.knee_springs[index].rest_angle = -target
                     relative_angle = self.shins[index].angle - self.hips[index].angle
                     motor.rate = -10.0 * (target - relative_angle)
@@ -432,7 +538,8 @@ class WhegSimulation:
                 torso_hit_ground = (
                     self._biped_torso_touches_ground()
                     if self.robot_type == "biped"
-                    else self.torso.position.y < 48.0
+                    else self.torso.position.y
+                    < self.terrain_height_at(self.torso.position.x) + 12.0
                 )
                 if torso_hit_ground:
                     self.fallen = True

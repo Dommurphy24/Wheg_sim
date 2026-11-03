@@ -254,7 +254,7 @@ class SimulatorApp:
         self.screen.fill(BACKGROUND)
         simulation = self.best_simulation
         floor_y = HEIGHT - 32
-        self._draw_environment(floor_y, simulation)
+        self._draw_environment(simulation)
         if simulation is not None:
             self._draw_robot(simulation, floor_y)
             self._draw_joint_status(simulation)
@@ -265,16 +265,26 @@ class SimulatorApp:
             self.screen.blit(message, (30, 30))
         self._draw_panel()
 
-    def _draw_environment(
-        self, floor_y: int, simulation: WhegSimulation | None
-    ) -> None:
+    def _draw_environment(self, simulation: WhegSimulation | None) -> None:
         pygame.draw.rect(self.screen, (36, 43, 55), (0, 0, VIEW_WIDTH, HEIGHT))
-        pygame.draw.rect(
-            self.screen, (29, 35, 45), (0, floor_y, VIEW_WIDTH, HEIGHT - floor_y)
+        terrain_points: list[tuple[int, int]] = []
+        screen_positions = list(range(0, VIEW_WIDTH, 12)) + [VIEW_WIDTH]
+        for screen_x in screen_positions:
+            world_x = self.camera_x + screen_x
+            surface_y = (
+                simulation.terrain_height_at(world_x)
+                if simulation is not None
+                else 36.0
+            )
+            terrain_points.append(
+                (screen_x, HEIGHT - round(surface_y))
+            )
+        pygame.draw.polygon(
+            self.screen,
+            (29, 35, 45),
+            terrain_points + [(VIEW_WIDTH, HEIGHT), (0, HEIGHT)],
         )
-        pygame.draw.line(
-            self.screen, GROUND, (0, floor_y), (VIEW_WIDTH, floor_y), 4
-        )
+        pygame.draw.lines(self.screen, GROUND, False, terrain_points, 4)
         if simulation is not None:
             first_marker = math.floor(self.camera_x / TRACK_MARK_SPACING)
             marker_count = math.ceil(VIEW_WIDTH / TRACK_MARK_SPACING) + 2
@@ -282,19 +292,33 @@ class SimulatorApp:
                 world_x = index * TRACK_MARK_SPACING
                 screen_x = int(world_x - self.camera_x)
                 distance = round(world_x - simulation.start_x)
+                marker_y = HEIGHT - round(simulation.terrain_height_at(world_x))
                 pygame.draw.line(
                     self.screen,
                     (71, 84, 101),
-                    (screen_x, floor_y - 18),
-                    (screen_x, floor_y + 1),
+                    (screen_x, marker_y - 18),
+                    (screen_x, marker_y + 1),
                     2,
                 )
                 marker_label = self.small_font.render(
                     f"{distance:+d}", True, MUTED
                 )
                 self.screen.blit(
-                    marker_label, (screen_x + 4, floor_y - 40)
+                    marker_label, (screen_x + 4, marker_y - 40)
                 )
+            sensor_points = [
+                self._world_to_screen(
+                    pymunk.Vec2d(
+                        simulation.torso.position.x + distance,
+                        simulation.terrain_height_at(
+                            simulation.torso.position.x + distance
+                        ),
+                    )
+                )
+                for distance in simulation.terrain_sensor_distances
+            ]
+            for point in sensor_points:
+                pygame.draw.circle(self.screen, ACCENT, point, 3)
 
     def _draw_robot(self, simulation: WhegSimulation, floor_y: int) -> None:
         lengths = simulation.limb_lengths
@@ -419,6 +443,15 @@ class SimulatorApp:
         for index, line in enumerate(lines):
             label = self.small_font.render(line, True, MUTED)
             self.screen.blit(label, (20, 18 + index * 21))
+        terrain_min = min(simulation.terrain_sensor_readings)
+        terrain_max = max(simulation.terrain_sensor_readings)
+        sensor_label = self.small_font.render(
+            f"Floor scan: 0-{simulation.terrain_sensor_range:.0f} units"
+            f"  height {terrain_min:+.1f} to {terrain_max:+.1f}",
+            True,
+            ACCENT,
+        )
+        self.screen.blit(sensor_label, (20, 18 + len(lines) * 21))
 
     def _draw_panel(self) -> None:
         x = WIDTH - PANEL_WIDTH

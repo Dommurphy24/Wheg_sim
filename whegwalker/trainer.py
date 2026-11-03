@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import multiprocessing
 import queue
+import random
 import time
 
 from whegwalker.genetics import GeneticAlgorithm, RobotType
@@ -28,6 +29,7 @@ def _evolution_worker(
     best_genome = algorithm.population[0].copy()
     history: list[float] = []
     steps_per_trial = round(trial_seconds / WhegSimulation.DT)
+    terrain_seed = algorithm.rng.randrange(2**32)
 
     def publish(
         generation: int,
@@ -54,7 +56,7 @@ def _evolution_worker(
                 if stop_event.is_set():
                     return
 
-                simulation = WhegSimulation(genome)
+                simulation = WhegSimulation(genome, terrain_seed=terrain_seed)
                 for step_index in range(0, steps_per_trial, 30):
                     if stop_event.is_set():
                         return
@@ -78,6 +80,7 @@ def _evolution_worker(
             generation_best = max(generation_scores)
             history.append(generation_best)
             algorithm.next_generation(generation_scores)
+            terrain_seed = algorithm.rng.randrange(2**32)
             publish(algorithm.generation, 0, generation_best)
     except Exception as error:
         messages.put(
@@ -188,7 +191,11 @@ class Trainer:
         self.fitness_weights = fitness_weights
         self.candidate_index = 0
         self.scores: list[float] = []
-        self.simulation = WhegSimulation(self.algorithm.population[0])
+        self._terrain_rng = random.Random()
+        self.terrain_seed = self._terrain_rng.randrange(2**32)
+        self.simulation = WhegSimulation(
+            self.algorithm.population[0], terrain_seed=self.terrain_seed
+        )
         self.history: list[float] = []
         self.last_generation_best: float | None = None
 
@@ -215,11 +222,13 @@ class Trainer:
             self.last_generation_best = max(self.scores)
             self.history.append(self.last_generation_best)
             self.algorithm.next_generation(self.scores)
+            self.terrain_seed = self._terrain_rng.randrange(2**32)
             self.candidate_index = 0
             self.scores.clear()
 
         self.simulation = WhegSimulation(
-            self.algorithm.population[self.candidate_index]
+            self.algorithm.population[self.candidate_index],
+            terrain_seed=self.terrain_seed,
         )
 
     def reset(self) -> None:
@@ -229,6 +238,9 @@ class Trainer:
         )
         self.candidate_index = 0
         self.scores = []
-        self.simulation = WhegSimulation(self.algorithm.population[0])
+        self.terrain_seed = self._terrain_rng.randrange(2**32)
+        self.simulation = WhegSimulation(
+            self.algorithm.population[0], terrain_seed=self.terrain_seed
+        )
         self.history = []
         self.last_generation_best = None

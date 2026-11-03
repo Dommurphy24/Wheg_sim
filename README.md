@@ -36,8 +36,9 @@ so far and refreshes the generation/evaluation/fitness status as candidates
 finish; candidate trials are simulated without drawing. **Space** pauses or
 resumes evolution, **B** restarts the visible best gait, **1/2/3** change its
 playback speed, **T** switches robot type, and **R** starts a fresh population.
-The teal upper leg marks the shared wheg hip drive. Each generation evaluates every candidate for the same
-five-second simulated duration.
+The teal upper leg marks the shared wheg hip drive. Each generation evaluates
+every candidate for the same five-second simulated duration on the same
+randomly generated terrain profile.
 The ground has scrolling distance marks to make forward movement easier to see.
 The four fitness-weight sliders are relative weights for maximum forward
 speed, forward distance per trial time, reduced torso bounce, and reduced
@@ -73,14 +74,18 @@ powered degree of freedom. Biped genomes evolve independent hip amplitudes and
 phases as well as knee and ankle targets; wheg genomes retain their shared
 coupled hip drive and hub speed. The controller uses periodic joint targets
 rather than a neural network so the relationship between the genome, joint
-motion, and locomotion is easy to inspect. The simulation uses a
-simple flat floor and is an educational prototype, not a high-fidelity
+motion, and locomotion is easy to inspect. The simulation uses simple
+randomized terrain and is an educational prototype, not a high-fidelity
 robotics model.
 
-Each physics substep applies small randomized force and torque disturbances to
-the torso to make evolved gaits less dependent on perfectly smooth motion.
-Trials use independent random noise by default; passing `noise_seed` to
-`WhegSimulation` makes a run repeatable for testing.
+The floor is a smoothly interpolated random profile with small height changes.
+The robot receives nine terrain-height readings spanning twice its modeled
+height ahead in the direction of travel. These readings are displayed in the
+viewer and add a bounded knee-lift adjustment when higher ground is detected.
+All candidates within a generation use the same terrain profile.
+Each physics substep also applies small randomized force and torque
+disturbances to the torso. Passing `terrain_seed` and `noise_seed` to
+`WhegSimulation` makes terrain and disturbance runs repeatable for testing.
 
 The fall-penalty slider scales the separate fall deduction from 0% to 100% of
 the default 1.0-point penalty. At 0%, falls incur no deduction; at 100%, the

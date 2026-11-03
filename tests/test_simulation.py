@@ -194,9 +194,15 @@ class SimulationTests(unittest.TestCase):
         self.assertGreater(simulation.motor_energy, 0.0)
 
     def test_small_random_disturbances_are_seedable_and_affect_motion(self) -> None:
-        first = WhegSimulation(test_genome(), noise_seed=123)
-        repeat = WhegSimulation(test_genome(), noise_seed=123)
-        different = WhegSimulation(test_genome(), noise_seed=124)
+        first = WhegSimulation(
+            test_genome(), noise_seed=123, terrain_seed=456
+        )
+        repeat = WhegSimulation(
+            test_genome(), noise_seed=123, terrain_seed=456
+        )
+        different = WhegSimulation(
+            test_genome(), noise_seed=124, terrain_seed=456
+        )
 
         for simulation in (first, repeat, different):
             simulation.step(120)
@@ -207,6 +213,56 @@ class SimulationTests(unittest.TestCase):
         self.assertGreater(
             (first.torso.position - different.torso.position).length, 0.001
         )
+
+    def test_seeded_terrain_is_smooth_random_and_scanned_ahead(self) -> None:
+        first = WhegSimulation(test_genome(), terrain_seed=321)
+        repeat = WhegSimulation(test_genome(), terrain_seed=321)
+        different = WhegSimulation(test_genome(), terrain_seed=322)
+        sample_xs = [
+            first.start_x + offset for offset in range(0, 700, 24)
+        ]
+        first_profile = [first.terrain_height_at(x) for x in sample_xs]
+        repeat_profile = [repeat.terrain_height_at(x) for x in sample_xs]
+        different_profile = [different.terrain_height_at(x) for x in sample_xs]
+
+        self.assertEqual(first_profile, repeat_profile)
+        self.assertNotEqual(first_profile, different_profile)
+        self.assertGreater(max(first_profile) - min(first_profile), 1.0)
+        self.assertEqual(
+            first.terrain_sensor_range, 2.0 * first.robot_height
+        )
+        self.assertEqual(
+            len(first.terrain_sensor_readings),
+            first.TERRAIN_SENSOR_SAMPLE_COUNT,
+        )
+        expected_readings = tuple(
+            first.terrain_height_at(first.start_x + distance)
+            - first.ground_y
+            - first.TERRAIN_RADIUS
+            for distance in first.terrain_sensor_distances
+        )
+        self.assertEqual(first.terrain_sensor_readings, expected_readings)
+
+    def test_forward_terrain_sensor_increases_knee_clearance_target(self) -> None:
+        simulation = WhegSimulation(
+            Genome.random(random.Random(83), "biped"), terrain_seed=84
+        )
+        flat_readings = (0.0,) * simulation.TERRAIN_SENSOR_SAMPLE_COUNT
+        simulation.terrain_sensor_readings = flat_readings
+        self.assertEqual(simulation._terrain_knee_lift(), 0.0)
+
+        simulation.terrain_sensor_readings = (
+            0.0,
+            2.0,
+            5.0,
+            10.0,
+            8.0,
+            6.0,
+            4.0,
+            2.0,
+            0.0,
+        )
+        self.assertGreater(simulation._terrain_knee_lift(), 0.0)
 
     def test_fitness_sliders_update_weights_and_prevent_zero_total(self) -> None:
         app = SimulatorApp.__new__(SimulatorApp)
@@ -407,7 +463,7 @@ class SimulationTests(unittest.TestCase):
             ankle_offset=DEFAULT_ANKLE_ANGLE,
             limb_lengths=[DEFAULT_LIMB_LENGTH] * 3,
         )
-        simulation = WhegSimulation(genome)
+        simulation = WhegSimulation(genome, noise_seed=0, terrain_seed=0)
         bodies = [
             simulation.torso,
             *simulation.hips,
@@ -499,8 +555,12 @@ class SimulationTests(unittest.TestCase):
     def test_ground_covers_robot_movement_range(self) -> None:
         simulation = WhegSimulation(test_genome(), start_x=-5000.0)
 
-        self.assertLess(simulation.ground.a.x, simulation.start_x)
-        self.assertGreater(simulation.ground.b.x, simulation.start_x)
+        self.assertLess(simulation.terrain_start_x, simulation.start_x)
+        self.assertGreater(simulation.terrain_end_x, simulation.start_x)
+        self.assertGreater(
+            simulation.terrain_end_x,
+            simulation.start_x + simulation.terrain_sensor_range,
+        )
 
     def test_positive_hub_command_rotates_hub_forward(self) -> None:
         genome = Genome(
@@ -699,14 +759,30 @@ class SimulationTests(unittest.TestCase):
             low_energy=0.0,
         )
         trainer = Trainer(population_size=2, fitness_weights=weights)
+        first_candidate_terrain = [
+            trainer.simulation.terrain_height_at(trainer.simulation.start_x + offset)
+            for offset in range(0, 500, 48)
+        ]
         trainer.update(600)
         self.assertEqual(trainer.generation, 1)
         self.assertEqual(trainer.evaluating, 2)
+        self.assertEqual(
+            first_candidate_terrain,
+            [
+                trainer.simulation.terrain_height_at(
+                    trainer.simulation.start_x + offset
+                )
+                for offset in range(0, 500, 48)
+            ],
+        )
 
+        first_generation_seed = trainer.terrain_seed
         trainer.update(600)
+
         self.assertEqual(trainer.generation, 2)
         self.assertEqual(trainer.evaluating, 1)
         self.assertEqual(len(trainer.history), 1)
+        self.assertNotEqual(trainer.terrain_seed, first_generation_seed)
 
     def test_trainer_reset_preserves_selected_robot_type(self) -> None:
         trainer = Trainer(population_size=2, robot_type="biped")
